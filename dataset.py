@@ -46,7 +46,7 @@ class WISDMUnifiedDataset(IterableDataset):
 
 if __name__ == "__main__":
     # Testing the dataset
-    data_path = os.getcwd() + '/data/wisdm-dataset/processed'
+    data_path = os.getcwd() + '/data/wisdm-dataset/preproc/'
     train_paths = glob.glob(os.path.join(data_path, "train/train_*.parquet"))
     val_paths = glob.glob(os.path.join(data_path, "val/val_*.parquet"))
 
