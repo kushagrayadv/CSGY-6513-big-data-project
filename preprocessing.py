@@ -128,7 +128,7 @@ if __name__ == "__main__":
     spark.stop()
     print(f"Total training samples: {len(train_rows)} | Total validation samples: {len(val_rows)}")
 
-    processed_data_dir = './data/wisdm-dataset/processed'
+    processed_data_dir = os.getcwd() + '/data/wisdm-dataset/processed'
     if not os.path.exists(processed_data_dir):
         os.makedirs(processed_data_dir)
 
@@ -151,3 +151,5 @@ if __name__ == "__main__":
 
     print("Train & Val windows written to parquet.")
     print("Test subjects held out for Kafka streaming:", sorted(test_subs))
+
+    spark.stop()
