@@ -3,7 +3,6 @@ import os
 import random
 
 import numpy as np
-from data_pipeline import gyro_df
 from pyspark.sql import SparkSession, functions as F, types as T, Row
 
 import utils
