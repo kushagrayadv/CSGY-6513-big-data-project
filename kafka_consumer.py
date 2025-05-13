@@ -2,23 +2,25 @@ import json
 import asyncio
 import numpy as np
 import torch
+import torch.nn.functional as F
 from aiokafka import AIOKafkaConsumer
-from model import LSTMAutoencoder
+from classifier_model import CNNBiLSTMClassifier
 import os
+import matplotlib.pyplot as plt
 
 FREQ_HZ = 50
 WINDOW_SIZE = 100
 STEP_SIZE = 50
 
-class LSTMConsumer:
+class ActivityClassifierConsumer:
     def __init__(self, bootstrap_servers='localhost:9092', topic_name='sensor_data', 
-                 model_path='lstmae_best.pt', threshold_path='val_recon_errors.npz'):
+                 model_path='cnn_bilstm_classifier_final.pt'):
         self.bootstrap_servers = bootstrap_servers
         self.topic_name = topic_name
         self.consumer = None
         
-        # Activity mapping
-        self.activities = {
+        # Activity mapping: Letter code -> Full name
+        self.activity_map = {
             'A': 'Walking',
             'B': 'Jogging',
             'C': 'Stairs',
@@ -39,37 +41,82 @@ class LSTMConsumer:
             'S': 'Folding Clothes'
         }
         
-        # Load LSTM model and threshold
+        # Create reverse mapping: Full name -> Letter code
+        self.reverse_activity_map = {v: k for k, v in self.activity_map.items()}
+        
+        # Load classifier model
         try:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             print(f"Using device: {self.device}")
             
-            # Initialize model
-            self.model = LSTMAutoencoder().to(self.device)
-            
-            # Load model weights
+            # Load model and metadata
             if os.path.exists(model_path):
-                print(f"Loading model weights from {model_path}")
-                self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+                print(f"Loading model from {model_path}")
+                checkpoint = torch.load(model_path, map_location=self.device)
+                
+                # Get class names from checkpoint
+                if "class_names" in checkpoint:
+                    self.class_names = checkpoint["class_names"]
+                    print(f"Loaded {len(self.class_names)} activity classes")
+                    
+                    # Map class indices to letters directly
+                    self.class_to_letter = {}
+                    
+                    for i, name in enumerate(self.class_names):
+                        letter = None
+                        
+                        # Check if the class name is exactly a letter (e.g., "A", "B", etc.)
+                        if name in self.activity_map:
+                            letter = name
+                        # Check if the class name is a full activity name (e.g., "Walking")
+                        elif name in self.reverse_activity_map:
+                            letter = self.reverse_activity_map[name]
+                        # Check if any activity name is contained in the class name
+                        else:
+                            for code, activity in self.activity_map.items():
+                                if activity in name or name in activity:
+                                    letter = code
+                                    break
+                        
+                        # If we found a letter, use it; otherwise use a placeholder
+                        if letter:
+                            self.class_to_letter[i] = letter
+                        else:
+                            self.class_to_letter[i] = f"Class-{i}"
+                else:
+                    # Use activities as fallback
+                    self.class_names = list(self.activity_map.values())
+                    self.class_to_letter = {i: k for i, (k, v) in enumerate(self.activity_map.items())}
+                    print(f"Using {len(self.class_names)} activity classes from mapping")
+                
+                # Create model
+                n_classes = len(self.class_names)
+                self.model = CNNBiLSTMClassifier(n_classes=n_classes).to(self.device)
+                
+                # Load weights
+                if "state_dict" in checkpoint:
+                    self.model.load_state_dict(checkpoint["state_dict"])
+                else:
+                    print("Warning: Model checkpoint doesn't contain state_dict")
+                    
                 self.model.eval()
+                print("Model loaded successfully")
             else:
-                print(f"Warning: Model weights file {model_path} not found.")
-                print("Using untrained model - predictions will be random")
+                print(f"Warning: Model file {model_path} not found.")
+                print("Creating untrained model - predictions will be random")
+                self.class_names = list(self.activity_map.values())
+                self.class_to_letter = {i: k for i, (k, v) in enumerate(self.activity_map.items())}
+                self.model = CNNBiLSTMClassifier(n_classes=len(self.class_names)).to(self.device)
                 self.model.eval()
-            
-            # Load threshold
-            if os.path.exists(threshold_path):
-                print(f"Loading threshold from {threshold_path}")
-                threshold_data = np.load(threshold_path)
-                self.threshold = float(threshold_data['threshold']) / 1000.0  # Scale down threshold
-                print(f"Using threshold: {self.threshold:.4f}")
-            else:
-                print(f"Warning: Threshold file {threshold_path} not found.")
-                print("Using default threshold of 0.5")
-                self.threshold = 0.5
+                
+            # Initialize stats
+            self.total_messages = 0
+            self.correct_predictions = 0
                 
         except Exception as e:
             print(f"Error loading model: {e}")
+            import traceback
+            traceback.print_exc()
             raise
 
     async def process_message(self, message):
@@ -77,23 +124,63 @@ class LSTMConsumer:
             data = message.value
             device_type = data['device']
             features = np.array(data['features'])
-            activity = data['activity'].strip()
+            activity_code = data['activity'].strip()
             subject_id = data['subject_id']
             
+            # Normalize the features (per sequence) as in the notebook
+            mean = np.mean(features, axis=0, keepdims=True)
+            std = np.std(features, axis=0, keepdims=True) + 1e-5
+            normalized_features = (features - mean) / std
+            
             # Convert features to tensor and reshape
-            features_tensor = torch.FloatTensor(features).reshape(1, WINDOW_SIZE, -1).to(self.device)
+            features_tensor = torch.FloatTensor(normalized_features).reshape(1, WINDOW_SIZE, -1).to(self.device)
             
-            # Get prediction
-            is_normal, recon_error = self.model.predict(features_tensor, self.threshold)
+            # Get ground truth activity - both code and name
+            ground_truth_name = self.activity_map.get(activity_code, f"Unknown ({activity_code})")
             
-            # Get activity name
-            activity_name = self.activities.get(activity, f"Unknown ({activity})")
+            # Forward pass through model for classification
+            self.model.eval()
+            with torch.no_grad():
+                # Get prediction
+                logits = self.model(features_tensor)
+                probs = F.softmax(logits, dim=1)
+                
+                # Get predicted class and confidence
+                confidence, pred_idx = torch.max(probs, dim=1)
+                confidence = confidence.item()
+                pred_idx = pred_idx.item()
+                
+                # Extract the letter code based on the predicted class index
+                predicted_letter = self.class_to_letter.get(pred_idx, "?")
+                
+                # If the predicted_letter still has "Class-" in it,
+                # check if the class name has the letter directly in it
+                if predicted_letter.startswith("Class-"):
+                    cls_name = self.class_names[pred_idx] if pred_idx < len(self.class_names) else "Unknown"
+                    
+                    # The class name might directly be the letter (e.g., "I" for class 8)
+                    if cls_name in self.activity_map:
+                        predicted_letter = cls_name
+                
+                # Get the full activity name based on the letter
+                predicted_name = self.activity_map.get(predicted_letter, self.class_names[pred_idx] if pred_idx < len(self.class_names) else "Unknown")
+                
+                # Check if prediction is correct using the extracted letter
+                is_correct = predicted_letter == activity_code
+                if is_correct:
+                    self.correct_predictions += 1
+            
+            self.total_messages += 1
+            accuracy = self.correct_predictions / self.total_messages if self.total_messages > 0 else 0
             
             # Print results
-            print(f"\nSubject: {subject_id}, Device: {device_type}")
-            print(f"Activity: {activity_name}")
-            print(f"Reconstruction Error: {recon_error:.4f}")
-            print(f"Status: {'Normal' if is_normal else 'Anomaly'}")
+            print(f"\n========================================")
+            print(f"Subject: {subject_id}, Device: {device_type}")
+            print(f"Predicted → {predicted_letter} ({predicted_name}) (conf: {confidence:.2f})")
+            print(f"Ground Truth: {activity_code} ({ground_truth_name})")
+            print(f"Correct: {'✓' if is_correct else '✗'}")
+            print(f"Accuracy: {accuracy:.2%} ({self.correct_predictions}/{self.total_messages})")
+            print(f"========================================")
 
         except Exception as e:
             print(f"Error processing message: {e}")
@@ -123,7 +210,7 @@ class LSTMConsumer:
             raise
 
 async def main():
-    consumer = LSTMConsumer()
+    consumer = ActivityClassifierConsumer()
     await consumer.start()
     await consumer.consume()
 
