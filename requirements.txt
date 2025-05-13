@@ -1,0 +1,6 @@
+aiokafka==0.10.0
+requests==2.31.0
+six==1.16.0
+pyspark==3.5.1
+numpy==1.26.4
+tqdm==4.66.2 

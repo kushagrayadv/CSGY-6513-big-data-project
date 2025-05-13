@@ -31,9 +31,14 @@ def interpolate_sensor_block(df, timestamps):
   return interp
 
 
-def create_labeled_windows(features, label, device_id, window_size, step_size):
-  rows = []
-  for i in range(0, len(features) - window_size + 1, step_size):
-    window = features[i:i + window_size].flatten().tolist()
-    rows.append((window, label, device_id))
-  return rows
+def create_labeled_windows(features, label, device_id, subject_id, window_size=100, step_size=50):
+    """Create sliding windows of sensor data with labels"""
+    windows = []
+    n_samples = len(features)
+    
+    for start in range(0, n_samples - window_size + 1, step_size):
+        end = start + window_size
+        window = features[start:end]
+        windows.append((window, label, device_id, subject_id))
+    
+    return windows
