@@ -11,6 +11,7 @@ import io
 import tempfile
 import glob
 from aiokafka import AIOKafkaProducer
+import scipy
 from scipy.interpolate import interp1d
 
 import utils
