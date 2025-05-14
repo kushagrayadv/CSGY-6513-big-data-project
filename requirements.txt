@@ -5,4 +5,4 @@ pyspark==3.5.1
 numpy==1.26.4
 tqdm==4.66.2
 SciPy==1.15.3
-setuptools=80.7.0
+setuptools==80.7.0
