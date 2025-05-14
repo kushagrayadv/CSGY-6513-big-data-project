@@ -6,3 +6,4 @@ numpy==1.26.4
 tqdm==4.66.2
 SciPy==1.15.3
 setuptools==80.7.0
+pandas==2.2.3
