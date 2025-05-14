@@ -36,7 +36,7 @@ from aiokafka import AIOKafkaProducer
 from preprocessing import DataProducer   # your Spark-based pipeline
 
 BROKER    = "localhost:9092"
-RAW_TOPIC = "wisdm_raw"                  # topic that holds raw / windowed data
+RAW_TOPIC = "wisdm_predictions"                  # topic that holds raw / windowed data
 
 async def main():
     """
