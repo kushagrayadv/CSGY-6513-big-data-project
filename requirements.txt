@@ -4,4 +4,4 @@ six==1.16.0
 pyspark==3.5.1
 numpy==1.26.4
 tqdm==4.66.2
-Scipy==1.15.3
+SciPy==1.15.3
