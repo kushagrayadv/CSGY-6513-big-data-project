@@ -158,6 +158,8 @@ class DataProducer:
         self.producer = None
         self.rows_sent = 0
         self.spark = None
+        self.base_dir = None
+        self.temp_dir = None  # Keep track of the temporary directory
 
     async def start(self):
         """Start the Kafka producer"""
@@ -172,81 +174,86 @@ class DataProducer:
             )
             await self.producer.start()
 
-            # Read processed data
-            phone_df = self.spark.read.parquet("./data/processed/phone_test.parquet")
-            watch_df = self.spark.read.parquet("./data/processed/watch_test.parquet")
-
-            # Print schema and sample data
-            print("\nPhone DataFrame Schema:")
-            phone_df.printSchema()
-            print("\nPhone DataFrame Sample:")
-            phone_df.show(5)
-
-            print("\nWatch DataFrame Schema:")
-            watch_df.printSchema()
-            print("\nWatch DataFrame Sample:")
-            watch_df.show(5)
-
-            # Convert to pandas for easier iteration
-            phone_data = phone_df.toPandas()
-            watch_data = watch_df.toPandas()
-
-            print("\nPhone Pandas Columns:", phone_data.columns.tolist())
-            print("Watch Pandas Columns:", watch_data.columns.tolist())
-
-            print(f"Loaded {len(phone_data)} phone records and {len(watch_data)} watch records")
+            # Ensure the dataset is available in a temporary directory
+            self.base_dir = ensure_dataset_available()
+            # Extract the temp directory from the base_dir path
+            self.temp_dir = os.path.dirname(os.path.dirname(self.base_dir))
+            
+            # Get the test subjects
+            _, _, test_subset = get_train_test__split(base_dir=self.base_dir)
+            self.test_subset = test_subset
+            
+            print(f"\nReady to process raw data from {self.base_dir} for {len(test_subset)} test subjects")
             return True
 
         except Exception as e:
             print(f"Error in producer: {e}")
+            self._cleanup()
             if self.producer:
                 await self.producer.stop()
             if self.spark:
                 self.spark.stop()
             return False
 
+    def _cleanup(self):
+        """Clean up temporary directories"""
+        if self.temp_dir and os.path.exists(self.temp_dir):
+            print(f"Cleaning up temporary directory: {self.temp_dir}")
+            import shutil
+            try:
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
+                print(f"Temporary directory removed: {self.temp_dir}")
+            except Exception as e:
+                print(f"Warning: Error while cleaning up temp directory: {e}")
+
     async def send_data(self):
-        """Send data to Kafka topic"""
+        """Process raw data and send to Kafka topic"""
         try:
-            phone_df = self.spark.read.parquet("./data/processed/phone_test.parquet")
-            watch_df = self.spark.read.parquet("./data/processed/watch_test.parquet")
-
-            # Convert to pandas for easier iteration
-            phone_data = phone_df.toPandas()
-            watch_data = watch_df.toPandas()
-
-            print(f"\nLoaded {len(phone_data)} phone records and {len(watch_data)} watch records")
-
-            # Process phone data by subject and activity
-            for device_type, data in [('phone', phone_data), ('watch', watch_data)]:
-                print(f"\nProcessing {device_type} data:")
+            # Get the test subjects
+            test_subset = self.test_subset
+            
+            print("\nProcessing raw data for streaming...")
+            
+            # Process phone data directly from raw files
+            phone_rows = process_subjects(test_subset, self.spark, "phone", 0, base_dir=self.base_dir)
+            if phone_rows:
+                print(f"Generated {len(phone_rows)} windows from phone data")
+            else:
+                print("No phone data was generated")
+            
+            # Process watch data directly from raw files
+            watch_rows = process_subjects(test_subset, self.spark, "watch", 1, base_dir=self.base_dir)
+            if watch_rows:
+                print(f"Generated {len(watch_rows)} windows from watch data")
+            else:
+                print("No watch data was generated")
+            
+            if not phone_rows and not watch_rows:
+                raise Exception("No data was processed. Check the dataset paths and subjects.")
+            
+            # Create DataFrames directly in memory (not saving to parquet)
+            phone_df = None
+            watch_df = None
+            
+            if phone_rows:
+                phone_df = rows_to_df(self.spark, phone_rows)
+                print(f"Created phone DataFrame with {phone_df.count()} rows")
                 
-                # Group data by subject and activity
-                for subject_id in sorted(set(data['subject_id'])):
-                    subject_data = data[data['subject_id'] == subject_id]
-                    print(f"\nSubject {subject_id}:")
-                    
-                    for activity in sorted(set(subject_data['label'])):
-                        activity_data = subject_data[subject_data['label'] == activity]
-                        activity_count = len(activity_data)
-                        print(f"  Activity {activity}: {activity_count} windows")
-                        
-                        # Send windows for this subject and activity
-                        for _, row in activity_data.iterrows():
-                            features = np.array(row['features']).reshape(WINDOW_SIZE, 6)
-                            
-                            # Skip windows containing NaN values
-                            if np.isnan(features).any():
-                                continue
-                                
-                            message = {
-                                'device': device_type,
-                                'subject_id': str(subject_id),
-                                'activity': str(activity),
-                                'features': features.tolist()
-                            }
-                            await self.producer.send_and_wait(self.topic, message)
-                            self.rows_sent += 1
+            if watch_rows:
+                watch_df = rows_to_df(self.spark, watch_rows)
+                print(f"Created watch DataFrame with {watch_df.count()} rows")
+            
+            print("\nStarting to send data to Kafka...")
+            
+            # Process phone data
+            if phone_df:
+                phone_data = phone_df.toPandas()
+                await self._send_device_data('phone', phone_data)
+            
+            # Process watch data
+            if watch_df:
+                watch_data = watch_df.toPandas()
+                await self._send_device_data('watch', watch_data)
 
             print(f"\nTotal messages sent: {self.rows_sent}")
 
@@ -255,6 +262,40 @@ class DataProducer:
             import traceback
             traceback.print_exc()
             raise
+
+    async def _send_device_data(self, device_type, data):
+        """Helper method to send data for a specific device type"""
+        print(f"\nProcessing {device_type} data with {len(data)} windows")
+        
+        # Group data by subject and activity
+        for subject_id in sorted(set(data['subject_id'])):
+            subject_data = data[data['subject_id'] == subject_id]
+            print(f"\nSubject {subject_id}:")
+            
+            for activity in sorted(set(subject_data['label'])):
+                activity_data = subject_data[subject_data['label'] == activity]
+                activity_count = len(activity_data)
+                print(f"  Activity {activity}: {activity_count} windows")
+                
+                # Send windows for this subject and activity
+                for _, row in activity_data.iterrows():
+                    features = np.array(row['features']).reshape(WINDOW_SIZE, 6)
+                    
+                    # Skip windows containing NaN values
+                    if np.isnan(features).any():
+                        continue
+                        
+                    message = {
+                        'device': device_type,
+                        'subject_id': str(subject_id),
+                        'activity': str(activity),
+                        'features': features.tolist()
+                    }
+                    await self.producer.send_and_wait(self.topic, message)
+                    self.rows_sent += 1
+                    
+                    # Add a small delay to prevent flooding
+                    await asyncio.sleep(0.01)
 
     async def run(self):
         """Main producer loop"""
@@ -272,31 +313,32 @@ class DataProducer:
                 await self.producer.stop()
             if self.spark:
                 self.spark.stop()
+            self._cleanup()  # Clean up temp directory
 
 
 def ensure_dataset_available():
-    """Download and extract the dataset if not already available"""
-    base_dir = './data/raw/wisdm-dataset/raw'
-    if os.path.exists(base_dir):
-        print("Dataset already exists")
-        return base_dir
-
-    print("Dataset not found. Downloading...")
-    os.makedirs("./data/raw", exist_ok=True)
+    """Download and extract the dataset to a temporary directory each time"""
+    # Create a new temporary directory for each run
+    temp_dir = tempfile.mkdtemp(prefix="wisdm_dataset_")
+    base_dir = os.path.join(temp_dir, "wisdm-dataset/raw")
+    
+    print(f"Creating temporary directory for dataset: {temp_dir}")
+    os.makedirs(base_dir, exist_ok=True)
     
     url = "https://archive.ics.uci.edu/ml/machine-learning-databases/00507/wisdm-dataset.zip"
     try:
+        print("Downloading dataset...")
         response = requests.get(url)
         response.raise_for_status()  # Raise an error for bad status codes
         
-        zip_path = "./data/raw/wisdm-dataset.zip"
+        zip_path = os.path.join(temp_dir, "wisdm-dataset.zip")
         with open(zip_path, "wb") as f:
             f.write(response.content)
         print("Dataset downloaded successfully")
         
         print("Extracting dataset...")
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall("./data/raw")
+            zip_ref.extractall(temp_dir)
         print("Dataset extracted successfully")
         
         # Verify the extraction
@@ -314,20 +356,28 @@ def ensure_dataset_available():
                 else:
                     print(f"WARNING: Directory not found: {path}")
         
+        # Clean up the zip file
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+            
         return base_dir
         
     except Exception as e:
         print(f"Error downloading/extracting dataset: {e}")
-        if os.path.exists("./data/raw/wisdm-dataset.zip"):
-            os.remove("./data/raw/wisdm-dataset.zip")
+        # Clean up on error
+        import shutil
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
         raise
 
 
 async def main():
+    temp_dir = None
     try:
-        # Ensure dataset is available
+        # Download dataset to a temporary directory
         base_dir = ensure_dataset_available()
-        print(f"Using dataset in: {base_dir}")
+        temp_dir = os.path.dirname(os.path.dirname(base_dir))
+        print(f"Using dataset in temporary directory: {base_dir}")
         
         # Get train/test split
         train_subset, val_subset, test_subset = get_train_test__split(base_dir=base_dir)
@@ -335,44 +385,8 @@ async def main():
         # Initialize Spark
         spark = get_spark_session()
         
-        print("\nProcessing test subjects for streaming...")
-        
-        # Process phone data
-        phone_rows = process_subjects(test_subset, spark, "phone", 0, base_dir=base_dir)
-        if phone_rows:
-            print(f"Generated {len(phone_rows)} windows from phone data")
-        else:
-            print("No phone data was generated")
-        
-        # Process watch data
-        watch_rows = process_subjects(test_subset, spark, "watch", 1, base_dir=base_dir)
-        if watch_rows:
-            print(f"Generated {len(watch_rows)} windows from watch data")
-        else:
-            print("No watch data was generated")
-        
-        if not phone_rows and not watch_rows:
-            raise Exception("No data was processed. Check the dataset paths and subjects.")
-        
-        # Create output directories
-        os.makedirs("./data/processed", exist_ok=True)
-        
-        # Convert to DataFrame and save
-        if phone_rows:
-            phone_df = rows_to_df(spark, phone_rows)
-            output_path = "./data/processed/phone_test.parquet"
-            phone_df.write.mode("overwrite").parquet(output_path)
-            print(f"Saved phone data to {output_path}")
-            
-        if watch_rows:
-            watch_df = rows_to_df(spark, watch_rows)
-            output_path = "./data/processed/watch_test.parquet"
-            watch_df.write.mode("overwrite").parquet(output_path)
-            print(f"Saved watch data to {output_path}")
-        
-        print("Data processing complete. Starting Kafka producer...")
-        
-        # Start Kafka producer
+        # Start Kafka producer (which will process and send the data directly)
+        print("\nStarting Kafka producer to process raw data...")
         producer = DataProducer()
         await producer.run()
         
@@ -384,6 +398,14 @@ async def main():
     finally:
         if 'spark' in locals():
             spark.stop()
+        # Clean up the temporary directory
+        if temp_dir and os.path.exists(temp_dir):
+            import shutil
+            try:
+                print(f"Cleaning up main temp directory: {temp_dir}")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception as e:
+                print(f"Warning: Error cleaning up temp directory: {e}")
 
 
 if __name__ == "__main__":

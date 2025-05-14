@@ -5,11 +5,14 @@ async def main():
     producer = DataProducer()
     try:
         # Start the producer
+        print("Starting producer - will download fresh dataset from source")
         if await producer.start():
             print("Producer started successfully")
+            print("Processing raw data directly from freshly downloaded files...")
             # Send the data
             await producer.send_data()
-            print("All data sent successfully")
+            print("All data processed and sent successfully")
+            print("Temporary data files will be removed automatically")
     except KeyboardInterrupt:
         print("\nShutting down...")
     except Exception as e:
