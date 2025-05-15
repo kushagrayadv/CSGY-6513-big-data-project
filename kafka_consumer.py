@@ -2,11 +2,34 @@ import json
 import asyncio
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from aiokafka import AIOKafkaConsumer
-from classifier_model import CNNBiLSTMClassifier
 import os
 import matplotlib.pyplot as plt
+
+# Model definition (from classifier_model.py)
+class CNNBiLSTMClassifier(nn.Module):
+    def __init__(self, input_size=6, cnn_ch=64, lstm_h=128, lstm_layers=2, n_classes=18):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv1d(input_size, cnn_ch, 3, padding=1),
+            nn.BatchNorm1d(cnn_ch), nn.ReLU(),
+            nn.Conv1d(cnn_ch, cnn_ch, 3, padding=1),
+            nn.BatchNorm1d(cnn_ch), nn.ReLU()
+        )
+        self.lstm = nn.LSTM(cnn_ch, lstm_h, lstm_layers,
+                            batch_first=True, bidirectional=True, dropout=0.2)
+        self.attn = nn.Linear(lstm_h*2, 1)
+        self.drop = nn.Dropout(0.5)
+        self.fc   = nn.Linear(lstm_h*2, n_classes)
+
+    def forward(self, x):                # x: (B,T,F)
+        x = self.conv(x.permute(0,2,1)).permute(0,2,1)    # (B,T,C)
+        out,_ = self.lstm(x)                               # (B,T,2H)
+        w = torch.softmax(self.attn(out).squeeze(-1), 1)   # (B,T)
+        ctx = torch.sum(out * w.unsqueeze(-1), 1)          # (B,2H)
+        return self.fc(self.drop(ctx))
 
 FREQ_HZ = 50
 WINDOW_SIZE = 100
@@ -210,9 +233,22 @@ class ActivityClassifierConsumer:
             raise
 
 async def main():
-    consumer = ActivityClassifierConsumer()
-    await consumer.start()
-    await consumer.consume()
+    consumer = ActivityClassifierConsumer(topic_name='wisdm_predictions')
+    try:
+        print("Starting activity classifier consumer...")
+        await consumer.start()
+        print("Consumer started successfully. Waiting for messages...")
+        await consumer.consume()
+    except KeyboardInterrupt:
+        print("\nShutting down consumer...")
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        if hasattr(consumer, 'consumer') and consumer.consumer:
+            await consumer.consumer.stop()
+            print("Consumer stopped")
 
 if __name__ == "__main__":
     asyncio.run(main()) 
