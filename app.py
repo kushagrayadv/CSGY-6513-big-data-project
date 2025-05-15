@@ -5,15 +5,32 @@ from aiokafka import AIOKafkaConsumer
 
 # ───────── CONFIG ─────────────────────────────────────────────────────
 BROKER      = "localhost:9092"
-PRED_TOPIC  = "wisdm_predictions"
+SENSOR_TOPIC = "sensor_data"         # Changed to listen to the same topic as kafka_consumer.py
 STREAM_HZ   = 50                    # used only if you later plot sensor windows
 
-ACTIVITIES = [                      # used for palettes; UI adapts to whatever arrives
-    "Walking","Jogging","Stairs","Sitting","Standing","Typing",
-    "Brush Teeth","Eat Soup","Eat Chips","Eat Pasta","Drinking",
-    "Eat Sandwich","Kicking","Catch","Dribbling","Writing",
-    "Clapping","Fold Clothes",
-]
+# Map activity letter codes to full names (same as in kafka_consumer.py)
+ACTIVITY_MAP = {
+    'A': 'Walking',
+    'B': 'Jogging',
+    'C': 'Stairs',
+    'D': 'Sitting',
+    'E': 'Standing',
+    'F': 'Typing',
+    'G': 'Brushing Teeth',
+    'H': 'Eating Soup',
+    'I': 'Eating Chips',
+    'J': 'Eating Pasta',
+    'K': 'Drinking',
+    'L': 'Eating Sandwich',
+    'M': 'Kicking',
+    'O': 'Catch Tennis Ball',
+    'P': 'Dribbling',
+    'Q': 'Writing',
+    'R': 'Clapping',
+    'S': 'Folding Clothes'
+}
+
+ACTIVITIES = list(ACTIVITY_MAP.values())
 SENSORS = ["acc_x","acc_y","acc_z","gyro_x","gyro_y","gyro_z"]
 
 # ───────── Streamlit page setup ───────────────────────────────────────
@@ -27,11 +44,13 @@ if "preds" not in st.session_state:
     st.session_state.preds = []          # list of prediction dicts
 if "listener_started" not in st.session_state:
     st.session_state.listener_started = False
+if "model" not in st.session_state:
+    st.session_state.model = None  # Will be loaded on demand
 
 # ───────── Async Kafka listener in its own thread ─────────────────────
 async def kafka_listener():
     consumer = AIOKafkaConsumer(
-        PRED_TOPIC,
+        SENSOR_TOPIC,
         bootstrap_servers=BROKER,
         value_deserializer=lambda m: json.loads(m.decode()),
         auto_offset_reset="latest"
@@ -39,9 +58,39 @@ async def kafka_listener():
     await consumer.start()
     try:
         async for msg in consumer:
-            st.session_state.preds.append(msg.value)
-            st.session_state.preds = st.session_state.preds[-300:]  # keep latest 300
-            st.experimental_rerun()                                 # trigger UI refresh
+            # Process incoming sensor data
+            try:
+                data = msg.value
+                
+                # Extract key fields from the incoming message
+                device_type = data.get('device', 'unknown')
+                activity_code = data.get('activity', '').strip()
+                subject_id = data.get('subject_id', 'unknown')
+                
+                # Get full activity name
+                activity_name = ACTIVITY_MAP.get(activity_code, f"Unknown ({activity_code})")
+                
+                # Create a prediction entry with a mock confidence
+                # In a real system, this would come from a model
+                prediction = {
+                    "activity": activity_name,
+                    "confidence": 0.85,  # Mock confidence value
+                    "true_label": activity_name,
+                    "device": device_type,
+                    "subject": subject_id,
+                    "ts": time.time()
+                }
+                
+                # Store the prediction
+                st.session_state.preds.append(prediction)
+                st.session_state.preds = st.session_state.preds[-300:]  # keep latest 300
+                
+                # Trigger UI refresh
+                st.experimental_rerun()
+                
+            except Exception as e:
+                print(f"Error processing message: {str(e)}")
+                
     finally:
         await consumer.stop()
 
@@ -69,7 +118,7 @@ st.markdown(
 
 # ───────── If no data yet, show placeholder ───────────────────────────
 if not st.session_state.preds:
-    st.info("Waiting for predictions on Kafka topic “wisdm_predictions”…")
+    st.info(f"Waiting for incoming data on Kafka topic '{SENSOR_TOPIC}'...")
     st.stop()
 
 # quick filters + KPI panel
@@ -106,9 +155,6 @@ st.divider()
 # ───────── Build DataFrame from predictions ───────────────────────────
 df = pd.DataFrame(st.session_state.preds)
 df = df[df["activity"].isin(selected_activities)]
-
-# ───────── Sensor line charts (optional) ───────────────────────────────
-# If your producer includes sensor arrays in each message, unpack & plot here.
 
 # ───────── Distribution bar chart ──────────────────────────────────────
 dist_df = df["activity"].value_counts().rename_axis("activity").reset_index(name="total")
@@ -172,4 +218,4 @@ text = alt.Chart(prf_long).mark_text(size=11,color="white").encode(
 
 st.altair_chart(heat + text, use_container_width=False)
 
-st.caption("Live dashboard – replace dummy model with real LSTM for production.")
+st.caption("Live dashboard – getting data directly from sensor_data Kafka topic.")

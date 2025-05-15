@@ -88,7 +88,7 @@ class ActivityClassifierConsumer:
                     self.class_names = list(self.activity_map.values())
                     self.class_to_letter = {i: k for i, (k, v) in enumerate(self.activity_map.items())}
                     print(f"Using {len(self.class_names)} activity classes from mapping")
-                
+        
                 # Create model
                 n_classes = len(self.class_names)
                 self.model = CNNBiLSTMClassifier(n_classes=n_classes).to(self.device)
