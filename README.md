@@ -24,12 +24,12 @@ A Kafka-based streaming system for real-time human activity recognition using se
 
 ## Running the System
 
-1. **Consumer** - Start in a terminal:
+1. **Consumer and Streamlit Integration** - Start in a terminal (make sure to follow the steps of using a Virtual Environment (venv) if you used it for previous tasks):
    ```
-   python kafka_consumer.py
+   streamlit run app.py
    ```
 
-2. **Producer** - Start in another terminal:
+2. **Producer** - Start in another terminal (make sure to follow the steps of using a Virtual Environment (venv) if you used it for previous tasks):
    ```
    python producer.py
    ```
@@ -37,6 +37,7 @@ A Kafka-based streaming system for real-time human activity recognition using se
 ## Key Files
 
 - `producer.py`: Standalone Kafka producer that downloads the WISDM dataset, processes it and sends data to Kafka
-- `kafka_consumer.py`: Consumes sensor data from Kafka and runs real-time activity classification
+- `app.py`: Consumes sensor data from Kafka and runs real-time activity classification and presents it on a Real-Time Web-Page
 - `model.py`: Contains model definitions used by the project
+- `data_pipeline_full_fixed_100.ipynb` : Contains the training of the CNN-BiLSTM Model
 - `requirements.txt`: Project dependencies
