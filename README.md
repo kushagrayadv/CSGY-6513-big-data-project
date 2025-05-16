@@ -41,3 +41,4 @@ A Kafka-based streaming system for real-time human activity recognition using se
 - `model.py`: Contains model definitions used by the project
 - `data_pipeline_full_fixed_100.ipynb` : Contains the training of the CNN-BiLSTM Model
 - `requirements.txt`: Project dependencies
+- `BIG DATA PROJECT REPORT.pdf` is the final report of our project
