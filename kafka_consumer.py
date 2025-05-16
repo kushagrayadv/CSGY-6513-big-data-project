@@ -38,6 +38,8 @@ STEP_SIZE = 50
 class ActivityClassifierConsumer:
     def __init__(self, bootstrap_servers='localhost:9092', topic_name='sensor_data', 
                  model_path='cnn_bilstm_classifier_final.pt'):
+        self.confidence = None
+        self.predicted_name = None
         self.bootstrap_servers = bootstrap_servers
         self.topic_name = topic_name
         self.consumer = None
@@ -170,7 +172,7 @@ class ActivityClassifierConsumer:
                 
                 # Get predicted class and confidence
                 confidence, pred_idx = torch.max(probs, dim=1)
-                confidence = confidence.item()
+                self.confidence = confidence.item()
                 pred_idx = pred_idx.item()
                 
                 # Extract the letter code based on the predicted class index
@@ -186,7 +188,7 @@ class ActivityClassifierConsumer:
                         predicted_letter = cls_name
                 
                 # Get the full activity name based on the letter
-                predicted_name = self.activity_map.get(predicted_letter, self.class_names[pred_idx] if pred_idx < len(self.class_names) else "Unknown")
+                self.predicted_name = self.activity_map.get(predicted_letter, self.class_names[pred_idx] if pred_idx < len(self.class_names) else "Unknown")
                 
                 # Check if prediction is correct using the extracted letter
                 is_correct = predicted_letter == activity_code
@@ -199,7 +201,7 @@ class ActivityClassifierConsumer:
             # Print results
             print(f"\n========================================")
             print(f"Subject: {subject_id}, Device: {device_type}")
-            print(f"Predicted → {predicted_letter} ({predicted_name}) (conf: {confidence:.2f})")
+            print(f"Predicted → {predicted_letter} ({self.predicted_name}) (conf: {self.confidence:.2f})")
             print(f"Ground Truth: {activity_code} ({ground_truth_name})")
             print(f"Correct: {'✓' if is_correct else '✗'}")
             print(f"Accuracy: {accuracy:.2%} ({self.correct_predictions}/{self.total_messages})")
